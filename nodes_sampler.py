@@ -1488,7 +1488,9 @@ class WanVideoSampler:
                     "one_to_all_controlnet_strength": one_to_all_data["controlnet_strength"] if one_to_all_data is not None else 0.0,
                     "scail_input": scail_data_in, # SCAIL input
                     "dual_control_input": dual_control_in, # LongVie2 dual control input
-                    "transformer_options": transformer_options
+                    "transformer_options": transformer_options,
+                    "rope_negative_offset": image_embeds.get("rope_negative_offset_frames", 0), # StoryMem rope negative offset
+                    "num_memory_frames": story_mem_latents.shape[1] if story_mem_latents is not None else 0, # StoryMem memory frames
                 }
 
                 batch_size = 1
