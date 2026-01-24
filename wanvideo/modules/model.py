@@ -2001,11 +2001,18 @@ class WanModel(torch.nn.Module):
             from ...HuMo.audio_proj import AudioProjModel
             self.audio_proj = AudioProjModel(seq_len=8, blocks=5, channels=1280, 
                 intermediate_dim=512, output_dim=1536, context_tokens=16)
-        # WanAnimate
+        # WanAnimate / Face Adapter
+        # Note: is_wananimate can be True for:
+        # 1. Full WAN Animate model (has pose_patch_embedding + face adapter)
+        # 2. Merged SCAIL+WanAnimate (has SCAIL's patch_embedding_pose + face adapter only)
+        # We only create pose_patch_embedding for case 1, face adapter for both
         self.motion_encoder = self.pose_patch_embedding = self.face_encoder = self.face_adapter = None
         if is_wananimate:
             from .wananimate.motion_encoder import MotionExtractor
             from .wananimate.face_blocks import FaceEncoder
+            # Note: pose_patch_embedding is only created for full WAN Animate models
+            # For SCAIL+WanAnimate merged models, the pose embedding comes from patch_embedding_pose
+            # which is created separately during model loading
             self.pose_patch_embedding = nn.Conv3d(16, dim, kernel_size=patch_size, stride=patch_size)
             self.motion_encoder = MotionExtractor()
 
@@ -2158,6 +2165,12 @@ class WanModel(torch.nn.Module):
 
 
     def wananimate_face_embedding(self, face_pixel_values):
+        if self.motion_encoder is None or self.face_encoder is None:
+            raise RuntimeError(
+                "WanAnimate face adapter requested but motion_encoder/face_encoder not initialized. "
+                "Your model may have face_adapter weights but was not detected as a WanAnimate model. "
+                "Please ensure your merged model includes: motion_encoder.*, face_encoder.*, and blocks.*.fuser_block.* weights."
+            )
         b,c,T,h,w = face_pixel_values.shape
         face_pixel_values = rearrange(face_pixel_values, "b c t h w -> (b t) c h w")
 
@@ -2181,9 +2194,63 @@ class WanModel(torch.nn.Module):
 
 
     def wananimate_forward(self, block, x, motion_vec, strength=1.0, motion_masks=None):
-            adapter_args = [x, motion_vec, motion_masks]
-            residual_out = block.fuser_block(*adapter_args)
-            return x.add(residual_out, alpha=strength)
+            # The fuser block uses rearrange with L=T (frames from motion_vec)
+            # The sequence length must be exactly divisible by T
+            # When SCAIL pose tokens or I2V conditioning is added, we need to extract
+            # only the portion that's properly divisible by the number of frames
+            
+            B, T, N, C = motion_vec.shape  # T = number of frames
+            total_seq = x.shape[1]
+            
+            # Calculate spatial tokens per frame (S) and expected video sequence length
+            # The video portion should be T * S where S is constant
+            S = total_seq // T  # This might be wrong if extra tokens exist
+            expected_video_seq = T * S
+            
+            # If there are extra tokens (SCAIL pose, I2V cond), we need to handle them
+            # The video tokens should be at the beginning or we need original_seq_len
+            if hasattr(self, 'original_seq_len'):
+                # Use original_seq_len as the video portion
+                video_seq = self.original_seq_len
+                # Ensure it's divisible by T
+                S = video_seq // T
+                expected_video_seq = T * S
+                
+                if expected_video_seq != video_seq:
+                    # There might be I2V conditioning prepended - adjust
+                    # Try to find the largest sequence divisible by T that fits
+                    S = video_seq // T
+                    expected_video_seq = T * S
+            
+            if total_seq > expected_video_seq:
+                # Extra tokens exist (SCAIL pose, etc.) - only process video portion
+                x_main = x[:, :expected_video_seq]
+                adapter_args = [x_main, motion_vec, motion_masks]
+                residual_out = block.fuser_block(*adapter_args)
+                x[:, :expected_video_seq] = x_main.add(residual_out, alpha=strength)
+                return x
+            elif total_seq == expected_video_seq:
+                # Exact match - process all
+                adapter_args = [x, motion_vec, motion_masks]
+                residual_out = block.fuser_block(*adapter_args)
+                return x.add(residual_out, alpha=strength)
+            else:
+                # Sequence is smaller than expected (context window?) - adjust T
+                # Find the divisible portion
+                S_new = total_seq // T
+                if S_new * T == total_seq:
+                    # It's divisible, proceed
+                    adapter_args = [x, motion_vec, motion_masks]
+                    residual_out = block.fuser_block(*adapter_args)
+                    return x.add(residual_out, alpha=strength)
+                else:
+                    # Not divisible - slice to largest divisible portion
+                    expected_seq = S_new * T
+                    x_main = x[:, :expected_seq]
+                    adapter_args = [x_main, motion_vec, motion_masks]
+                    residual_out = block.fuser_block(*adapter_args)
+                    x[:, :expected_seq] = x_main.add(residual_out, alpha=strength)
+                    return x
 
 
     def rope_encode_comfy(self, t, h, w, freq_offset=0, t_start=0, ref_frame_shape=None, pose_frame_shape=None,
@@ -2321,6 +2388,7 @@ class WanModel(torch.nn.Module):
         scail_input=None,  # SCAIL pose
         dual_control_input=None,  # LongVie2 dual controlnet
         transformer_options={},
+        **kwargs,  # Catch any extra arguments from LoRAs or patches
     ):
         r"""
         Forward pass through the diffusion model

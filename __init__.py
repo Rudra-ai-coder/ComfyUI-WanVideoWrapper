@@ -48,6 +48,7 @@ OPTIONAL_MODULES = [
     (".onetoall.nodes", "OneToAll"),
     (".WanMove.nodes", "WanMove"),
     (".SCAIL.nodes", "SCAIL"),
+    (".SCAIL.scail_wananimate_combined", "SCAIL+WanAnimate"),
     (".LongCat.nodes", "LongCat"),
     (".LongVie2.nodes", "LongVie2"),
 ]

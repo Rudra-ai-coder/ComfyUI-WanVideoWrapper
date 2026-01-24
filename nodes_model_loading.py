@@ -807,7 +807,7 @@ def rename_fuser_block(name):
 def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
                  transformer_load_device=None, block_swap_args=None, gguf=False, reader=None, patcher=None, compile_args=None):
     params_to_keep = {"time_in", "patch_embedding", "time_", "modulation", "text_embedding",
-                      "adapter", "add", "ref_conv", "casual_audio_encoder", "cond_encoder", "frame_packer", "audio_proj_glob", "face_encoder", "fuser_block"}
+                      "adapter", "add", "ref_conv", "casual_audio_encoder", "cond_encoder", "frame_packer", "audio_proj_glob", "face_encoder", "fuser_block", "motion_encoder"}
     param_count = sum(1 for _ in transformer.named_parameters())
     pbar = ProgressBar(param_count)
     cnt = 0
@@ -891,6 +891,15 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
             continue
 
         key = name.replace("_orig_mod.", "")
+        
+        # Skip parameters that don't exist in state dict 
+        # (e.g., pose_patch_embedding when using SCAIL+WanAnimate merged model)
+        if key not in sd:
+            # Only warn for expected missing keys, silently skip for known patterns
+            if not any(pattern in key for pattern in ["pose_patch_embedding", "loras", "uni3c"]):
+                log.warning(f"Skipping parameter {key} - not found in state dict")
+            continue
+            
         value=sd[key]
         keep_fp32 = ["patch_embedding", "motion_encoder", "condition_embedding"]
 
@@ -1176,8 +1185,16 @@ class WanVideoModelLoader:
 
 
         is_wananimate = "pose_patch_embedding.weight" in sd
+        # Also detect face adapter weights (for merged SCAIL+WanAnimate models)
+        has_face_adapter = any(
+            k.startswith("face_adapter.") or 
+            k.startswith("face_encoder.") or
+            k.startswith("motion_encoder.") or
+            "fuser_block." in k 
+            for k in sd.keys()
+        )
         # rename WanAnimate face fuser block keys to insert into main blocks instead
-        if is_wananimate:
+        if is_wananimate or has_face_adapter:
             for key in list(sd.keys()):
                 new_key = rename_fuser_block(key)
                 if new_key != key:
@@ -1278,7 +1295,20 @@ class WanVideoModelLoader:
             patch_size = [1]
 
         is_humo = "audio_proj.audio_proj_glob_1.layer.weight" in sd
+        # Detect WAN Animate model or merged SCAIL+WanAnimate model with face adapter
         is_wananimate = "pose_patch_embedding.weight" in sd
+        has_face_adapter = any(
+            k.startswith("face_encoder.") or
+            k.startswith("motion_encoder.") or
+            "fuser_block." in k 
+            for k in sd.keys()
+        )
+        # Enable WAN Animate face features if face adapter weights are present
+        if has_face_adapter and not is_wananimate:
+            log.info("WAN Animate face adapter weights detected (face_encoder/motion_encoder/fuser_block)")
+        if is_wananimate:
+            log.info("WAN Animate model detected (pose_patch_embedding)")
+        is_wananimate = is_wananimate or has_face_adapter
 
         #lynx
         lynx_ip_layers = lynx_ref_layers = None
