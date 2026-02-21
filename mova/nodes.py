@@ -41,6 +41,7 @@ from comfy import model_management as mm
 from comfy.utils import ProgressBar
 
 from ..utils import log, set_module_tensor_to_device
+from ..nodes_model_loading import load_weights
 from ..wanvideo.schedulers import get_scheduler, scheduler_list
 from .mova_sampler import mova_inference_single_step, sinusoidal_embedding_1d
 
@@ -645,16 +646,32 @@ class MOVASampler:
         bridge_model = bridge["model"]
         bridge_condition_scale = bridge.get("condition_scale", 1.0)
 
-        # video_dit_2 is an optional WANVIDEOMODEL patcher (same as stage-1 model)
+        # video_dit_2 is an optional WANVIDEOMODEL patcher (same as stage-1 model).
+        # Its transformer is on the meta device (weights stored lazily in patcher.model["sd"]).
+        # Use the same load_weights() pattern as nodes_sampler.py to materialise it.
         video_dit_2_transformer = None
         if video_dit_2 is not None:
-            video_dit_2_transformer = video_dit_2.model.diffusion_model
+            v2_model_obj = video_dit_2.model
+            video_dit_2_transformer = v2_model_obj.diffusion_model
+            v2_sd = v2_model_obj.get("sd", None)
+            v2_weight_dtype = v2_model_obj.get("weight_dtype", dtype)
+            v2_gguf_reader = v2_model_obj.get("gguf_reader", None)
+            v2_block_swap = video_dit_2.model_options.get("transformer_options", {}).get("block_swap_args", None)
+            if v2_sd is not None and v2_gguf_reader is None:
+                load_weights(video_dit_2_transformer, v2_sd, v2_weight_dtype,
+                             base_dtype=dtype, transformer_load_device=device,
+                             block_swap_args=v2_block_swap)
+            elif v2_gguf_reader is not None:
+                load_weights(video_dit_2_transformer, v2_sd, base_dtype=dtype,
+                             transformer_load_device=device, patcher=video_dit_2,
+                             gguf=True, reader=v2_gguf_reader, block_swap_args=v2_block_swap)
+            else:
+                # Weights were already merged/loaded at loader time — just move to device.
+                video_dit_2_transformer.to(device)
 
         # Move to device
         audio_dit_model.to(device)
         bridge_model.to(device)
-        if video_dit_2_transformer is not None:
-            video_dit_2_transformer.to(device)
 
         transformer_options = copy.deepcopy(
             patcher.model_options.get("transformer_options", {})
