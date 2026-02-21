@@ -509,7 +509,7 @@ class MOVASampler:
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
-        dtype = getattr(model_obj, "base_dtype", None) or torch.bfloat16
+        dtype = model_obj.pipeline.get("base_dtype", None) or torch.bfloat16
 
         # ---- Extract image / conditioning from WANVIDIMAGE_EMBEDS ----
         # "image_embeds" key holds the condition latent [C, T, H, W] (no batch dim)
@@ -645,6 +645,23 @@ class MOVASampler:
         audio_dit_model = audio_dit["model"]
         bridge_model = bridge["model"]
         bridge_condition_scale = bridge.get("condition_scale", 1.0)
+
+        # Stage-1 transformer: materialise weights from patcher.model["sd"] (meta device → GPU),
+        # using the same lazy-load pattern as nodes_sampler.py.
+        s1_sd = model_obj.pipeline.get("sd", None)
+        s1_weight_dtype = model_obj.pipeline.get("weight_dtype", dtype)
+        s1_gguf_reader = model_obj.pipeline.get("gguf_reader", None)
+        s1_block_swap = patcher.model_options.get("transformer_options", {}).get("block_swap_args", None)
+        if s1_sd is not None and s1_gguf_reader is None:
+            load_weights(transformer, s1_sd, s1_weight_dtype,
+                         base_dtype=dtype, transformer_load_device=device,
+                         block_swap_args=s1_block_swap)
+        elif s1_gguf_reader is not None:
+            load_weights(transformer, s1_sd, base_dtype=dtype,
+                         transformer_load_device=device, patcher=patcher,
+                         gguf=True, reader=s1_gguf_reader, block_swap_args=s1_block_swap)
+        else:
+            transformer.to(device)
 
         # video_dit_2 is an optional WANVIDEOMODEL patcher (same as stage-1 model).
         # Its transformer is on the meta device (weights stored lazily in patcher.model["sd"]).
