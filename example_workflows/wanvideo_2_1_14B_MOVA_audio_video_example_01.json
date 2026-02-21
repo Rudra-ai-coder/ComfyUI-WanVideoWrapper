@@ -62,7 +62,7 @@
       ],
       "properties": {"Node name for S&R": "MOVAAudioDITLoader"},
       "widgets_values": [
-        "/path/to/MOVA-360p",
+        "MOVA-360p",
         "bf16",
         "offload_device"
       ]
@@ -81,7 +81,7 @@
       ],
       "properties": {"Node name for S&R": "MOVABridgeLoader"},
       "widgets_values": [
-        "/path/to/MOVA-360p",
+        "MOVA-360p",
         "bf16",
         "offload_device",
         "shallow_focus",
@@ -102,7 +102,7 @@
       ],
       "properties": {"Node name for S&R": "MOVAAudioVAELoader"},
       "widgets_values": [
-        "/path/to/MOVA-360p",
+        "MOVA-360p",
         "bf16",
         44100
       ]

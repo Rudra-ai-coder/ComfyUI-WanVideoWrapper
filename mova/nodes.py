@@ -53,6 +53,35 @@ folder_paths.add_model_folder_path(
 )
 
 
+def _get_mova_checkpoint_dirs() -> list:
+    """
+    Return a sorted list of sub-directory names found in any registered 'mova'
+    model folder (typically ComfyUI/models/mova/).  Each entry is a name like
+    'MOVA-360p' that the loaders will resolve to a full path at runtime.
+    If no checkpoints are found, return a placeholder so the UI still loads.
+    """
+    dirs = []
+    for base in folder_paths.get_folder_paths("mova"):
+        if os.path.isdir(base):
+            for name in sorted(os.listdir(base)):
+                full = os.path.join(base, name)
+                if os.path.isdir(full):
+                    dirs.append(name)
+    return dirs if dirs else ["MOVA-360p"]
+
+
+def _resolve_mova_ckpt(ckpt_name: str) -> str:
+    """Resolve a checkpoint directory name to its full path."""
+    for base in folder_paths.get_folder_paths("mova"):
+        full = os.path.join(base, ckpt_name)
+        if os.path.isdir(full):
+            return full
+    raise FileNotFoundError(
+        f"[MOVA] Checkpoint '{ckpt_name}' not found in any mova model folder.\n"
+        f"Place it under: {folder_paths.get_folder_paths('mova')[0]}"
+    )
+
+
 def _load_safetensors_or_bin(model_dir: str, device: torch.device) -> dict:
     """
     Load model weights from a directory, supporting:
@@ -195,9 +224,8 @@ class MOVAAudioDITLoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "ckpt_path": ("STRING", {
-                    "default": "",
-                    "tooltip": "Path to the MOVA checkpoint root (e.g. /data/MOVA-360p). Must contain audio_dit/ sub-folder.",
+                "mova_checkpoint": (_get_mova_checkpoint_dirs(), {
+                    "tooltip": "MOVA checkpoint folder from ComfyUI/models/mova/ (e.g. MOVA-360p). Must contain audio_dit/ sub-folder.",
                 }),
                 "base_precision": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
                 "load_device": (
@@ -212,7 +240,7 @@ class MOVAAudioDITLoader:
     FUNCTION = "load"
     CATEGORY = "WanVideoWrapper/MOVA"
 
-    def load(self, ckpt_path: str, base_precision: str, load_device: str):
+    def load(self, mova_checkpoint: str, base_precision: str, load_device: str):
         from ..wanvideo.modules.mova.wan_audio_dit import WanAudioModel
 
         dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
@@ -222,6 +250,7 @@ class MOVAAudioDITLoader:
         offload_device = mm.unet_offload_device()
         target_device = device if load_device == "main_device" else offload_device
 
+        ckpt_path = _resolve_mova_ckpt(mova_checkpoint)
         audio_dit_dir = os.path.join(ckpt_path, "audio_dit")
         if not os.path.isdir(audio_dit_dir):
             raise ValueError(f"[MOVA] audio_dit/ not found in: {ckpt_path!r}")
@@ -246,9 +275,8 @@ class MOVABridgeLoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "ckpt_path": ("STRING", {
-                    "default": "",
-                    "tooltip": "Path to the MOVA checkpoint root. Must contain dual_tower_bridge/ sub-folder.",
+                "mova_checkpoint": (_get_mova_checkpoint_dirs(), {
+                    "tooltip": "MOVA checkpoint folder from ComfyUI/models/mova/ (e.g. MOVA-360p). Must contain dual_tower_bridge/ sub-folder.",
                 }),
                 "base_precision": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
                 "load_device": (
@@ -276,7 +304,7 @@ class MOVABridgeLoader:
 
     def load(
         self,
-        ckpt_path: str,
+        mova_checkpoint: str,
         base_precision: str,
         load_device: str,
         interaction_strategy: str,
@@ -292,6 +320,7 @@ class MOVABridgeLoader:
         offload_device = mm.unet_offload_device()
         target_device = device if load_device == "main_device" else offload_device
 
+        ckpt_path = _resolve_mova_ckpt(mova_checkpoint)
         bridge_dir = os.path.join(ckpt_path, "dual_tower_bridge")
         if not os.path.isdir(bridge_dir):
             raise ValueError(f"[MOVA] dual_tower_bridge/ not found in: {ckpt_path!r}")
@@ -335,9 +364,8 @@ class MOVAAudioVAELoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "ckpt_path": ("STRING", {
-                    "default": "",
-                    "tooltip": "Path to the MOVA checkpoint directory containing audio_vae/ sub-folder.",
+                "mova_checkpoint": (_get_mova_checkpoint_dirs(), {
+                    "tooltip": "MOVA checkpoint folder from ComfyUI/models/mova/ (e.g. MOVA-360p). Must contain audio_vae/ sub-folder.",
                 }),
                 "base_precision": (["fp32", "bf16", "fp16"], {"default": "fp32"}),
                 "load_device": (
@@ -352,7 +380,7 @@ class MOVAAudioVAELoader:
     FUNCTION = "load"
     CATEGORY = "WanVideoWrapper/MOVA"
 
-    def load(self, ckpt_path: str, base_precision: str, load_device: str):
+    def load(self, mova_checkpoint: str, base_precision: str, load_device: str):
         from ..wanvideo.modules.mova.dac_vae import DAC
 
         dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
@@ -362,6 +390,7 @@ class MOVAAudioVAELoader:
         offload_device = mm.unet_offload_device()
         target_device = device if load_device == "main_device" else offload_device
 
+        ckpt_path = _resolve_mova_ckpt(mova_checkpoint)
         audio_vae_dir = os.path.join(ckpt_path, "audio_vae")
         if not os.path.isdir(audio_vae_dir):
             raise ValueError(f"[MOVA] audio_vae/ not found in: {ckpt_path!r}")
