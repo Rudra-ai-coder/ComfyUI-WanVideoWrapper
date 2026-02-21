@@ -511,7 +511,7 @@ class Decoder(nn.Module):
         return self.model(x)
 
 
-class DAC(nn.Module, ModelMixin, ConfigMixin):
+class DAC(ModelMixin, ConfigMixin):
 
     @register_to_config
     def __init__(
