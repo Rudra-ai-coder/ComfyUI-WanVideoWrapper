@@ -252,7 +252,17 @@ def mova_inference_single_step(
     # Use WanModel's rope_encode_comfy if available (preferred), else build manually.
     # IMPORTANT: pass pre-patch latent grid sizes to match WanModel.forward().
     if hasattr(visual_dit, 'rope_encode_comfy'):
-        visual_freqs = visual_dit.rope_encode_comfy(F_in, H_in, W_in, device=device, dtype=model_dtype)
+        # MOVA path does not prepend memory-frame tokens to visual_x, so keep
+        # rope positions aligned with the actual token sequence length.
+        visual_freqs = visual_dit.rope_encode_comfy(
+            F_in,
+            H_in,
+            W_in,
+            device=device,
+            dtype=model_dtype,
+            num_memory_frames=0,
+            rope_negative_offset=0,
+        )
     else:
         visual_freqs_tuple = tuple(freq.to(device) for freq in visual_dit.freqs)
         visual_freqs = torch.cat([
