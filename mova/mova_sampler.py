@@ -223,6 +223,9 @@ def mova_inference_single_step(
     # 3. Patchify visual latents
     # ------------------------------------------------------------------ #
     visual_x = visual_latents.to(model_dtype)
+    # Wan's rope_encode_comfy expects pre-patch latent grid sizes (F, H, W),
+    # not the post-patch (T, H, W) sizes from patch_embedding output.
+    F_in, H_in, W_in = visual_x.shape[2], visual_x.shape[3], visual_x.shape[4]
     # WanModel.patch_embedding takes B,C,T,H,W
     visual_x_patched_list = [
         visual_dit.patch_embedding(visual_x[i:i+1].float()).to(model_dtype)
@@ -246,9 +249,10 @@ def mova_inference_single_step(
     # ------------------------------------------------------------------ #
     # 4. RoPE frequencies for visual
     # ------------------------------------------------------------------ #
-    # Use WanModel's rope_encode_comfy if available (preferred), else build manually
+    # Use WanModel's rope_encode_comfy if available (preferred), else build manually.
+    # IMPORTANT: pass pre-patch latent grid sizes to match WanModel.forward().
     if hasattr(visual_dit, 'rope_encode_comfy'):
-        visual_freqs = visual_dit.rope_encode_comfy(T, H, W, device=device, dtype=model_dtype)
+        visual_freqs = visual_dit.rope_encode_comfy(F_in, H_in, W_in, device=device, dtype=model_dtype)
     else:
         visual_freqs_tuple = tuple(freq.to(device) for freq in visual_dit.freqs)
         visual_freqs = torch.cat([
