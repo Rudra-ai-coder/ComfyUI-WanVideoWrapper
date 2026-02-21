@@ -52,6 +52,7 @@ except Exception:
     # Fallback so module import succeeds even when yunchang isn't available.
     # `USPAttention` will error if instantiated without LongContextAttention.
     class AttnType:  # type: ignore
+        FA = None
         FA3 = None
 
     
