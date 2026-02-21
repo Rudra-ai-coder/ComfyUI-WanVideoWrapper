@@ -653,9 +653,9 @@ class MOVASampler:
         if video_dit_2 is not None:
             v2_model_obj = video_dit_2.model
             video_dit_2_transformer = v2_model_obj.diffusion_model
-            v2_sd = v2_model_obj.get("sd", None)
-            v2_weight_dtype = v2_model_obj.get("weight_dtype", dtype)
-            v2_gguf_reader = v2_model_obj.get("gguf_reader", None)
+            v2_sd = v2_model_obj.pipeline.get("sd", None)
+            v2_weight_dtype = v2_model_obj.pipeline.get("weight_dtype", dtype)
+            v2_gguf_reader = v2_model_obj.pipeline.get("gguf_reader", None)
             v2_block_swap = video_dit_2.model_options.get("transformer_options", {}).get("block_swap_args", None)
             if v2_sd is not None and v2_gguf_reader is None:
                 load_weights(video_dit_2_transformer, v2_sd, v2_weight_dtype,
