@@ -2,25 +2,30 @@
 MOVA ComfyUI nodes for ComfyUI-WanVideoWrapper.
 
 Provides:
-  - MOVAAudioDITLoader: loads WanAudioModel, DualTowerConditionalBridge, optional stage-2 WanModel
-  - MOVAAudioVAELoader: loads DAC audio VAE
-  - MOVASampler: dual-tower denoising loop producing video + audio latents
-  - MOVADecodeAudio: decodes audio latents to waveform tensor
+  - MOVAAudioDITLoader  : loads audio_dit/ only  → MOVA_AUDIO_DIT
+  - MOVABridgeLoader    : loads dual_tower_bridge/ only  → MOVA_BRIDGE
+  - MOVAAudioVAELoader  : loads audio_vae/ only  → MOVA_AUDIO_VAE
+  - MOVASampler         : dual-tower denoising
+        required: WANVIDEOMODEL (stage-1) + MOVA_AUDIO_DIT + MOVA_BRIDGE
+        optional: WANVIDEOMODEL (stage-2, video_dit_2) + WANVIDEOTEXTEMBEDS
+        outputs:  LATENT + MOVA_AUDIO_LATENTS
+  - MOVADecodeAudio     : decodes MOVA_AUDIO_LATENTS → AUDIO
 
-Checkpoint layout expected:
+Checkpoint layout (HuggingFace MOVA-360p / MOVA-720p):
     <ckpt_path>/
-        audio_dit/
-            config.json
-            model.safetensors   (or model.bin)
-        dual_tower_bridge/
-            config.json
-            model.safetensors
-        audio_vae/
-            config.json
-            model.safetensors
-        video_dit_2/            (optional)
-            config.json
-            model.safetensors
+        audio_dit/         (2.84 GB, single safetensors)
+        audio_vae/         (743 MB,  single safetensors)
+        dual_tower_bridge/ (5.32 GB, single safetensors)
+        video_dit/         (28.6 GB, 3 shards) ← use WanVideoModelLoader
+        video_dit_2/       (28.6 GB, 3 shards) ← use a 2nd WanVideoModelLoader
+
+Workflow pattern:
+    WanVideoModelLoader (video_dit merged)     → WANVIDEOMODEL  ─────────────────┬
+    WanVideoModelLoader (video_dit_2 merged)   → WANVIDEOMODEL (opt.)  ───────┤
+    MOVAAudioDITLoader                         → MOVA_AUDIO_DIT  ───────────┤
+    MOVABridgeLoader                           → MOVA_BRIDGE  ──────────────┤→ MOVASampler
+    WanVideoTextEncode                         → WANVIDEOTEXTEMBEDS  ───────|
+    WanVideoImageToVideoEncode                 → WANVIDIMAGE_EMBEDS  ───────┘
 """
 import gc
 import json
@@ -177,13 +182,13 @@ def _load_model_from_dir(
 
 
 # ---------------------------------------------------------------------------
-# Node 1: Audio DiT + Bridge + (optional) Stage-2 Video DiT loader
+# Node 1a: Audio DiT loader
 # ---------------------------------------------------------------------------
 
 class MOVAAudioDITLoader:
     """
-    Loads the MOVA audio DiT (WanAudioModel), the dual-tower bridge
-    (DualTowerConditionalBridge), and optionally the stage-2 video DiT.
+    Loads the MOVA audio DiT (WanAudioModel) from the audio_dit/ sub-folder.
+    Plug the output into MOVASampler's audio_dit input.
     """
 
     @classmethod
@@ -192,65 +197,23 @@ class MOVAAudioDITLoader:
             "required": {
                 "ckpt_path": ("STRING", {
                     "default": "",
-                    "tooltip": (
-                        "Path to the MOVA checkpoint directory containing "
-                        "audio_dit/, dual_tower_bridge/, and optionally video_dit_2/ sub-folders."
-                    ),
+                    "tooltip": "Path to the MOVA checkpoint root (e.g. /data/MOVA-360p). Must contain audio_dit/ sub-folder.",
                 }),
                 "base_precision": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
                 "load_device": (
                     ["main_device", "offload_device"],
-                    {"default": "offload_device",
-                     "tooltip": "Device to load weights onto initially."}
+                    {"default": "offload_device"},
                 ),
-                "load_video_dit_2": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "Load the optional stage-2 video DiT (video_dit_2/) if present.",
-                }),
-                "video_dit_2_precision": (
-                    ["bf16", "fp16", "fp32", "fp8_e4m3fn", "fp8_e5m2"],
-                    {
-                        "default": "fp8_e4m3fn",
-                        "tooltip": (
-                            "Precision for video_dit_2 (28.6 GB). fp8_e4m3fn halves VRAM "
-                            "vs bf16 and is recommended for consumer GPUs."
-                        ),
-                    }
-                ),
-                "interaction_strategy": (
-                    ["shallow_focus", "distributed", "progressive", "full"],
-                    {
-                        "default": "shallow_focus",
-                        "tooltip": (
-                            "Bridge interaction strategy. 'shallow_focus' uses the first ~1/3 "
-                            "of layers — the default from MOVA training."
-                        ),
-                    }
-                ),
-                "condition_scale": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
-                    "tooltip": "Overall bridge conditioning scale."
-                }),
             },
         }
 
-    RETURN_TYPES = ("MOVA_MODEL",)
-    RETURN_NAMES = ("mova_model",)
+    RETURN_TYPES = ("MOVA_AUDIO_DIT",)
+    RETURN_NAMES = ("audio_dit",)
     FUNCTION = "load"
     CATEGORY = "WanVideoWrapper/MOVA"
 
-    def load(
-        self,
-        ckpt_path: str,
-        base_precision: str,
-        load_device: str,
-        load_video_dit_2: bool,
-        video_dit_2_precision: str,
-        interaction_strategy: str,
-        condition_scale: float,
-    ):
+    def load(self, ckpt_path: str, base_precision: str, load_device: str):
         from ..wanvideo.modules.mova.wan_audio_dit import WanAudioModel
-        from ..wanvideo.modules.mova.interactionv2 import DualTowerConditionalBridge
 
         dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
         dtype = dtype_map[base_precision]
@@ -259,67 +222,106 @@ class MOVAAudioDITLoader:
         offload_device = mm.unet_offload_device()
         target_device = device if load_device == "main_device" else offload_device
 
-        if not os.path.isdir(ckpt_path):
-            raise ValueError(f"[MOVA] ckpt_path is not a directory: {ckpt_path!r}")
-
-        # ---- Audio DiT ----
         audio_dit_dir = os.path.join(ckpt_path, "audio_dit")
+        if not os.path.isdir(audio_dit_dir):
+            raise ValueError(f"[MOVA] audio_dit/ not found in: {ckpt_path!r}")
+
         log.info(f"[MOVA] Loading audio DiT from {audio_dit_dir}")
-        audio_dit = _load_model_from_dir(WanAudioModel, audio_dit_dir, dtype, target_device)
+        model = _load_model_from_dir(WanAudioModel, audio_dit_dir, dtype, target_device)
+        log.info("[MOVA] Audio DiT loaded.")
+        return ({"model": model, "dtype": dtype},)
 
-        # ---- Dual-tower bridge ----
+
+# ---------------------------------------------------------------------------
+# Node 1b: Bridge loader
+# ---------------------------------------------------------------------------
+
+class MOVABridgeLoader:
+    """
+    Loads the MOVA DualTowerConditionalBridge from the dual_tower_bridge/ sub-folder.
+    Plug the output into MOVASampler's bridge input.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "ckpt_path": ("STRING", {
+                    "default": "",
+                    "tooltip": "Path to the MOVA checkpoint root. Must contain dual_tower_bridge/ sub-folder.",
+                }),
+                "base_precision": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
+                "load_device": (
+                    ["main_device", "offload_device"],
+                    {"default": "offload_device"},
+                ),
+                "interaction_strategy": (
+                    ["shallow_focus", "distributed", "progressive", "full"],
+                    {
+                        "default": "shallow_focus",
+                        "tooltip": "Bridge interaction strategy. 'shallow_focus' (default from MOVA training) uses only the first ~1/3 of layers.",
+                    }
+                ),
+                "condition_scale": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
+                    "tooltip": "Default bridge conditioning scale. Can be overridden per-direction in MOVASampler.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("MOVA_BRIDGE",)
+    RETURN_NAMES = ("bridge",)
+    FUNCTION = "load"
+    CATEGORY = "WanVideoWrapper/MOVA"
+
+    def load(
+        self,
+        ckpt_path: str,
+        base_precision: str,
+        load_device: str,
+        interaction_strategy: str,
+        condition_scale: float,
+    ):
+        from ..wanvideo.modules.mova.interactionv2 import DualTowerConditionalBridge
+        from accelerate import init_empty_weights
+
+        dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+        dtype = dtype_map[base_precision]
+
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+        target_device = device if load_device == "main_device" else offload_device
+
         bridge_dir = os.path.join(ckpt_path, "dual_tower_bridge")
-        log.info(f"[MOVA] Loading bridge from {bridge_dir}")
+        if not os.path.isdir(bridge_dir):
+            raise ValueError(f"[MOVA] dual_tower_bridge/ not found in: {ckpt_path!r}")
 
-        # Load bridge config and potentially override interaction_strategy
-        with open(os.path.join(bridge_dir, "config.json")) as f:
+        config_path = os.path.join(bridge_dir, "config.json")
+        with open(config_path) as f:
             bridge_cfg = json.load(f)
         bridge_cfg.pop("_class_name", None)
         bridge_cfg.pop("_diffusers_version", None)
-        # Override interaction_strategy if user changed it
         bridge_cfg["interaction_strategy"] = interaction_strategy
 
-        from accelerate import init_empty_weights
+        log.info(f"[MOVA] Loading bridge from {bridge_dir} (strategy={interaction_strategy})")
         with init_empty_weights():
             bridge = DualTowerConditionalBridge(**bridge_cfg)
         bridge.eval()
 
         bridge_sd = _load_safetensors_or_bin(bridge_dir, torch.device("cpu"))
-        for name, param in bridge.named_parameters():
+        for name, _param in bridge.named_parameters():
             if name in bridge_sd:
                 set_module_tensor_to_device(bridge, name, device=target_device, dtype=dtype, value=bridge_sd[name])
+            else:
+                log.warning(f"[MOVA] Bridge param not in checkpoint: {name}")
         for name, buf in bridge.named_buffers():
             if buf is None:
                 continue
             if name in bridge_sd:
                 set_module_tensor_to_device(bridge, name, device=target_device, dtype=buf.dtype, value=bridge_sd[name])
 
-        # ---- Stage-2 video DiT (optional) ----
-        video_dit_2 = None
-        if load_video_dit_2:
-            video_dit_2_dir = os.path.join(ckpt_path, "video_dit_2")
-            if os.path.isdir(video_dit_2_dir):
-                log.info(f"[MOVA] Loading stage-2 video DiT from {video_dit_2_dir} ({video_dit_2_precision})")
-                # video_dit_2 is sharded (3× ~10 GB). FP8 is recommended to reduce VRAM.
-                from ..wanvideo.modules.mova.wan_video_dit import WanModel as MOVAWanModel
-                fp8_mode = video_dit_2_precision if video_dit_2_precision.startswith("fp8") else "disabled"
-                v2_dtype = dtype_map.get(video_dit_2_precision, dtype) if not fp8_mode.startswith("fp8") else dtype
-                video_dit_2 = _load_model_from_dir(
-                    MOVAWanModel, video_dit_2_dir, v2_dtype, target_device, fp8_mode=fp8_mode
-                )
-            else:
-                log.info("[MOVA] video_dit_2/ not found, skipping stage-2 video DiT.")
-
-        mova_model = {
-            "audio_dit": audio_dit,
-            "bridge": bridge,
-            "video_dit_2": video_dit_2,
-            "dtype": dtype,
-            "condition_scale": condition_scale,
-        }
-
-        log.info("[MOVA] Audio DiT + Bridge loaded successfully.")
-        return (mova_model,)
+        log.info("[MOVA] Bridge loaded.")
+        return ({"model": bridge, "dtype": dtype, "condition_scale": condition_scale},)
 
 
 # ---------------------------------------------------------------------------
@@ -384,50 +386,56 @@ class MOVAAudioVAELoader:
 
 class MOVASampler:
     """
-    Dual-tower denoising loop for MOVA.
+    MOVA dual-tower denoising loop.
 
-    Plugs into WanVideoWrapper's existing LATENT pipeline outputs from
-    WanVideoSampler — takes the same WANVIDEOMODEL and conditioning structures,
-    then adds audio generation via MOVA.
-
-    Outputs video latents (LATENT) and audio latents (MOVA_AUDIO_LATENTS).
+    Reuses WanVideoWrapper's existing WANVIDEOMODEL for the visual DiT(s) — the same
+    model you get from WanVideoModelLoader — and adds audio generation via a separate
+    audio DiT and cross-modal bridge.  Stage-2 video DiT (video_dit_2) is optional:
+    connect a second WanVideoModelLoader output to video_dit_2 for the high-noise phase.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("WANVIDEOMODEL", {}),
+                "model": ("WANVIDEOMODEL", {
+                    "tooltip": "Stage-1 video DiT from WanVideoModelLoader (video_dit).",
+                }),
                 "image_embeds": ("WANVIDIMAGE_EMBEDS", {}),
-                "mova_model": ("MOVA_MODEL", {}),
+                "audio_dit": ("MOVA_AUDIO_DIT", {
+                    "tooltip": "Audio DiT from MOVAAudioDITLoader.",
+                }),
+                "bridge": ("MOVA_BRIDGE", {
+                    "tooltip": "Dual-tower bridge from MOVABridgeLoader.",
+                }),
                 "steps": ("INT", {"default": 30, "min": 1, "max": 500}),
                 "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
                 "shift": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "scheduler": (scheduler_list, {"default": "unipc"}),
                 "video_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.1,
-                                        "tooltip": "Frames per second of the output video, used for cross-modal RoPE alignment."}),
+                                        "tooltip": "Frames per second — used for cross-modal RoPE alignment."}),
                 "audio_latent_channels": ("INT", {"default": 128, "min": 1, "max": 512,
-                                                   "tooltip": "Audio latent channels (latent_dim of the audio VAE). Default 128 for MOVA DAC."}),
+                                                   "tooltip": "latent_dim of the audio VAE. Default 128 for MOVA DAC."}),
                 "audio_hop_length": ("INT", {"default": 2048, "min": 1, "max": 16384,
-                                              "tooltip": "Audio VAE hop length. Default 2048 for MOVA DAC at 44100Hz."}),
-                "audio_sample_rate": ("INT", {"default": 44100, "min": 8000, "max": 96000,
-                                               "tooltip": "Target audio sample rate in Hz."}),
+                                              "tooltip": "Audio VAE hop length. Default 2048 for MOVA DAC at 44100 Hz."}),
+                "audio_sample_rate": ("INT", {"default": 44100, "min": 8000, "max": 96000}),
                 "boundary_ratio": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01,
-                                              "tooltip": "Fractional timestep at which to switch to stage-2 video DiT (if loaded). 0.9 = MOVA default."}),
-                "condition_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
-                                               "tooltip": "Bridge conditioning scale (applied to both a2v and v2a)."}),
+                                              "tooltip": "Fraction of the noise schedule after which stage-2 video DiT takes over (if connected). 0.9 = MOVA default."}),
                 "force_offload": ("BOOLEAN", {"default": True}),
             },
             "optional": {
+                "video_dit_2": ("WANVIDEOMODEL", {
+                    "tooltip": "Optional stage-2 video DiT from a second WanVideoModelLoader (video_dit_2). Used for the low-noise phase.",
+                }),
                 "text_embeds": ("WANVIDEOTEXTEMBEDS", {}),
                 "samples": ("LATENT", {"tooltip": "Existing video latents for video2video."}),
                 "audio_latents": ("MOVA_AUDIO_LATENTS", {"tooltip": "Existing audio latents for audio2audio."}),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "a2v_condition_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
-                                                   "tooltip": "Audio->visual conditioning scale (overrides condition_scale when set)."}),
+                                                   "tooltip": "Audio→visual scale (overrides bridge's condition_scale when set)."}),
                 "v2a_condition_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
-                                                   "tooltip": "Visual->audio conditioning scale (overrides condition_scale when set)."}),
+                                                   "tooltip": "Visual→audio scale (overrides bridge's condition_scale when set)."}),
                 "sigmas": ("SIGMAS", {}),
             },
         }
@@ -441,7 +449,8 @@ class MOVASampler:
         self,
         model,
         image_embeds,
-        mova_model,
+        audio_dit,
+        bridge,
         steps: int,
         cfg: float,
         shift: float,
@@ -452,8 +461,8 @@ class MOVASampler:
         audio_hop_length: int,
         audio_sample_rate: int,
         boundary_ratio: float,
-        condition_scale: float,
         force_offload: bool,
+        video_dit_2=None,
         text_embeds=None,
         samples=None,
         audio_latents=None,
@@ -470,7 +479,7 @@ class MOVASampler:
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
-        dtype = model_obj["base_dtype"]
+        dtype = getattr(model_obj, "base_dtype", None) or torch.bfloat16
 
         # ---- Extract image / conditioning from WANVIDIMAGE_EMBEDS ----
         # "image_embeds" key holds the condition latent [C, T, H, W] (no batch dim)
@@ -602,16 +611,21 @@ class MOVASampler:
             latent_condition = img_cond_combined.unsqueeze(0)  # [1, 4+C, T, H, W]
 
         # ---- Stage setup ----
-        audio_dit = mova_model["audio_dit"]
-        bridge = mova_model["bridge"]
-        video_dit_2 = mova_model.get("video_dit_2", None)
-        bridge_condition_scale = mova_model.get("condition_scale", condition_scale)
+        # audio_dit and bridge are now plain dicts from their respective loaders
+        audio_dit_model = audio_dit["model"]
+        bridge_model = bridge["model"]
+        bridge_condition_scale = bridge.get("condition_scale", 1.0)
+
+        # video_dit_2 is an optional WANVIDEOMODEL patcher (same as stage-1 model)
+        video_dit_2_transformer = None
+        if video_dit_2 is not None:
+            video_dit_2_transformer = video_dit_2.model.diffusion_model
 
         # Move to device
-        audio_dit.to(device)
-        bridge.to(device)
-        if video_dit_2 is not None:
-            video_dit_2.to(device)
+        audio_dit_model.to(device)
+        bridge_model.to(device)
+        if video_dit_2_transformer is not None:
+            video_dit_2_transformer.to(device)
 
         transformer_options = copy.deepcopy(
             patcher.model_options.get("transformer_options", {})
@@ -632,8 +646,8 @@ class MOVASampler:
             audio_t = t  # same timestep schedule for audio
 
             # Stage switching: switch to stage-2 video DiT when timestep drops below boundary
-            if not switched and video_dit_2 is not None and t.item() < boundary_timestep:
-                cur_visual_dit = video_dit_2
+            if not switched and video_dit_2_transformer is not None and t.item() < boundary_timestep:
+                cur_visual_dit = video_dit_2_transformer
                 switched = True
 
             # Build model input: [B, noise_C + cond_C, T, H, W]
@@ -650,8 +664,8 @@ class MOVASampler:
             # ---- Positive pass ----
             noise_pred_pos_vid, noise_pred_pos_aud = mova_inference_single_step(
                 visual_dit=cur_visual_dit,
-                audio_dit=audio_dit,
-                bridge=bridge,
+                audio_dit=audio_dit_model,
+                bridge=bridge_model,
                 visual_latents=latent_model_input,
                 audio_latents=aud_latents,
                 context=positive_context.to(device, dtype=dtype),
@@ -671,8 +685,8 @@ class MOVASampler:
             if cfg != 1.0 and negative_context is not None:
                 noise_pred_neg_vid, noise_pred_neg_aud = mova_inference_single_step(
                     visual_dit=cur_visual_dit,
-                    audio_dit=audio_dit,
-                    bridge=bridge,
+                    audio_dit=audio_dit_model,
+                    bridge=bridge_model,
                     visual_latents=latent_model_input,
                     audio_latents=aud_latents,
                     context=negative_context.to(device, dtype=dtype),
@@ -711,10 +725,10 @@ class MOVASampler:
 
         # ---- Clean up MOVA models if force_offload ----
         if force_offload:
-            audio_dit.to(offload_device)
-            bridge.to(offload_device)
-            if video_dit_2 is not None:
-                video_dit_2.to(offload_device)
+            audio_dit_model.to(offload_device)
+            bridge_model.to(offload_device)
+            if video_dit_2_transformer is not None:
+                video_dit_2_transformer.to(offload_device)
             mm.soft_empty_cache()
 
         return ({"samples": video_latents}, aud_latents)
@@ -781,6 +795,7 @@ class MOVADecodeAudio:
 
 NODE_CLASS_MAPPINGS = {
     "MOVAAudioDITLoader": MOVAAudioDITLoader,
+    "MOVABridgeLoader": MOVABridgeLoader,
     "MOVAAudioVAELoader": MOVAAudioVAELoader,
     "MOVASampler": MOVASampler,
     "MOVADecodeAudio": MOVADecodeAudio,
@@ -788,6 +803,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MOVAAudioDITLoader": "MOVA Audio DiT Loader",
+    "MOVABridgeLoader": "MOVA Bridge Loader",
     "MOVAAudioVAELoader": "MOVA Audio VAE Loader",
     "MOVASampler": "MOVA Sampler",
     "MOVADecodeAudio": "MOVA Decode Audio",
