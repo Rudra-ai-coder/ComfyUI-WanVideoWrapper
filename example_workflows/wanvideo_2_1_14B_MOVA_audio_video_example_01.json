@@ -1,6 +1,6 @@
 {
-  "last_node_id": 13,
-  "last_link_id": 17,
+  "last_node_id": 14,
+  "last_link_id": 18,
   "nodes": [
     {
       "id": 1,
@@ -21,8 +21,7 @@
         "bf16",
         "fp8_e4m3fn",
         "offload_device",
-        "disabled",
-        false
+        "sdpa"
       ]
     },
     {
@@ -44,8 +43,7 @@
         "bf16",
         "fp8_e4m3fn",
         "offload_device",
-        "disabled",
-        false
+        "sdpa"
       ]
     },
     {
@@ -103,8 +101,8 @@
       "properties": {"Node name for S&R": "MOVAAudioVAELoader"},
       "widgets_values": [
         "MOVA-360p",
-        "bf16",
-        44100
+        "fp32",
+        "offload_device"
       ]
     },
     {
@@ -117,10 +115,10 @@
       "mode": 0,
       "inputs": [],
       "outputs": [
-        {"name": "vae", "type": "VAE", "links": [6, 7], "slot_index": 0}
+        {"name": "vae", "type": "WANVAE", "links": [6, 7], "slot_index": 0}
       ],
       "properties": {"Node name for S&R": "WanVideoVAELoader"},
-      "widgets_values": ["wan_2.1_vae.safetensors"]
+      "widgets_values": ["wan_2.1_vae.safetensors", "bf16"]
     },
     {
       "id": 7,
@@ -142,30 +140,53 @@
       "id": 8,
       "type": "WanVideoImageToVideoEncode",
       "pos": [760, 590],
-      "size": [360, 280],
+      "size": [360, 310],
       "flags": {},
       "order": 7,
       "mode": 0,
       "inputs": [
-        {"name": "vae", "type": "VAE", "link": 6, "slot_index": 0},
-        {"name": "start_image", "type": "IMAGE", "link": 8, "slot_index": 1},
-        {"name": "end_image", "type": "IMAGE", "link": null, "slot_index": 2}
+        {"name": "vae", "type": "WANVAE", "link": 6, "slot_index": 0},
+        {"name": "clip_embeds", "type": "WANVIDIMAGE_CLIPEMBEDS", "link": null, "slot_index": 1},
+        {"name": "start_image", "type": "IMAGE", "link": 8, "slot_index": 2},
+        {"name": "end_image", "type": "IMAGE", "link": null, "slot_index": 3}
       ],
       "outputs": [
-        {"name": "image_embeds", "type": "WANVIDIMAGE_EMBEDS", "links": [9, 10], "slot_index": 0}
+        {"name": "image_embeds", "type": "WANVIDIMAGE_EMBEDS", "links": [9], "slot_index": 0}
       ],
       "properties": {"Node name for S&R": "WanVideoImageToVideoEncode"},
-      "widgets_values": [81, 480, 832, "crop", false]
+      "widgets_values": [640, 360, 81, 0.0, 1.0, 1.0, true, false, false, 0.0]
+    },
+    {
+      "id": 14,
+      "type": "LoadWanVideoT5TextEncoder",
+      "pos": [800, 40],
+      "size": [340, 160],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "wan_t5_model", "type": "WANTEXTENCODER", "links": [18], "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "LoadWanVideoT5TextEncoder"},
+      "widgets_values": [
+        "umt5-xxl-enc-bf16.safetensors",
+        "bf16",
+        "offload_device",
+        "disabled"
+      ]
     },
     {
       "id": 9,
       "type": "WanVideoTextEncode",
       "pos": [430, 40],
-      "size": [340, 220],
+      "size": [340, 240],
       "flags": {},
-      "order": 8,
+      "order": 9,
       "mode": 0,
-      "inputs": [],
+      "inputs": [
+        {"name": "t5", "type": "WANTEXTENCODER", "link": 18, "slot_index": 0}
+      ],
       "outputs": [
         {"name": "text_embeds", "type": "WANVIDEOTEXTEMBEDS", "links": [11], "slot_index": 0}
       ],
@@ -173,17 +194,18 @@
       "widgets_values": [
         "A person speaks warmly while expressive background music plays.",
         "low quality, blurry, artifacts",
-        "t5",
-        true
+        true,
+        false,
+        "gpu"
       ]
     },
     {
       "id": 10,
       "type": "MOVASampler",
       "pos": [1170, 40],
-      "size": [400, 620],
+      "size": [400, 600],
       "flags": {},
-      "order": 9,
+      "order": 10,
       "mode": 0,
       "inputs": [
         {"name": "model", "type": "WANVIDEOMODEL", "link": 1, "slot_index": 0},
@@ -204,34 +226,33 @@
         {"name": "audio_latents", "type": "MOVA_AUDIO_LATENTS", "links": [13], "slot_index": 1}
       ],
       "properties": {"Node name for S&R": "MOVASampler"},
-      "widgets_values": [30, 6.0, 5.0, 42, "unipc", 24.0, 128, 2048, 44100, 0.9, 1.0, true]
+      "widgets_values": [30, 6.0, 5.0, 42, "unipc", 24.0, 128, 2048, 44100, 0.9, true]
     },
     {
       "id": 11,
-      "type": "WanVideoDecoder",
+      "type": "WanVideoDecode",
       "pos": [1620, 40],
-      "size": [340, 200],
+      "size": [340, 230],
       "flags": {},
-      "order": 10,
+      "order": 11,
       "mode": 0,
       "inputs": [
-        {"name": "samples", "type": "LATENT", "link": 12, "slot_index": 0},
-        {"name": "vae", "type": "VAE", "link": 7, "slot_index": 1},
-        {"name": "image_embeds", "type": "WANVIDIMAGE_EMBEDS", "link": 10, "slot_index": 2}
+        {"name": "vae", "type": "WANVAE", "link": 7, "slot_index": 0},
+        {"name": "samples", "type": "LATENT", "link": 12, "slot_index": 1}
       ],
       "outputs": [
         {"name": "images", "type": "IMAGE", "links": [14], "slot_index": 0}
       ],
-      "properties": {"Node name for S&R": "WanVideoDecoder"},
-      "widgets_values": [true, "center"]
+      "properties": {"Node name for S&R": "WanVideoDecode"},
+      "widgets_values": [false, 272, 272, 144, 128, "default"]
     },
     {
       "id": 12,
       "type": "MOVADecodeAudio",
-      "pos": [1620, 300],
+      "pos": [1620, 330],
       "size": [300, 120],
       "flags": {},
-      "order": 11,
+      "order": 12,
       "mode": 0,
       "inputs": [
         {"name": "audio_vae", "type": "MOVA_AUDIO_VAE", "link": 5, "slot_index": 0},
@@ -249,7 +270,7 @@
       "pos": [1980, 40],
       "size": [340, 320],
       "flags": {},
-      "order": 12,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {"name": "images", "type": "IMAGE", "link": 14, "slot_index": 0},
@@ -264,21 +285,21 @@
     }
   ],
   "links": [
-    [1,  1,  0, 10, 0, "WANVIDEOMODEL"],
-    [2,  2,  0, 10, 4, "WANVIDEOMODEL"],
-    [3,  3,  0, 10, 2, "MOVA_AUDIO_DIT"],
-    [4,  4,  0, 10, 3, "MOVA_BRIDGE"],
-    [5,  5,  0, 12, 0, "MOVA_AUDIO_VAE"],
-    [6,  6,  0,  8, 0, "VAE"],
-    [7,  6,  0, 11, 1, "VAE"],
-    [8,  7,  0,  8, 1, "IMAGE"],
-    [9,  8,  0, 10, 1, "WANVIDIMAGE_EMBEDS"],
-    [10, 8,  0, 11, 2, "WANVIDIMAGE_EMBEDS"],
-    [11, 9,  0, 10, 5, "WANVIDEOTEXTEMBEDS"],
-    [12, 10, 0, 11, 0, "LATENT"],
-    [13, 10, 1, 12, 1, "MOVA_AUDIO_LATENTS"],
-    [14, 11, 0, 13, 0, "IMAGE"],
-    [15, 12, 0, 13, 1, "AUDIO"]
+    [1,  1,  0, 10, 0,  "WANVIDEOMODEL"],
+    [2,  2,  0, 10, 4,  "WANVIDEOMODEL"],
+    [3,  3,  0, 10, 2,  "MOVA_AUDIO_DIT"],
+    [4,  4,  0, 10, 3,  "MOVA_BRIDGE"],
+    [5,  5,  0, 12, 0,  "MOVA_AUDIO_VAE"],
+    [6,  6,  0,  8, 0,  "WANVAE"],
+    [7,  6,  0, 11, 0,  "WANVAE"],
+    [8,  7,  0,  8, 2,  "IMAGE"],
+    [9,  8,  0, 10, 1,  "WANVIDIMAGE_EMBEDS"],
+    [11, 9,  0, 10, 5,  "WANVIDEOTEXTEMBEDS"],
+    [12, 10, 0, 11, 1,  "LATENT"],
+    [13, 10, 1, 12, 1,  "MOVA_AUDIO_LATENTS"],
+    [14, 11, 0, 13, 0,  "IMAGE"],
+    [15, 12, 0, 13, 1,  "AUDIO"],
+    [18, 14, 0,  9, 0,  "WANTEXTENCODER"]
   ],
   "groups": [
     {
@@ -289,7 +310,7 @@
     },
     {
       "title": "MOVA-specific models",
-      "bounding": [30, 570, 370, 620],
+      "bounding": [30, 570, 370, 530],
       "color": "#7b4fa6",
       "font_size": 14
     },
@@ -301,13 +322,13 @@
     },
     {
       "title": "Sampling",
-      "bounding": [1160, 20, 420, 660],
+      "bounding": [1160, 20, 420, 640],
       "color": "#2e7d4f",
       "font_size": 14
     },
     {
       "title": "Decode & Save",
-      "bounding": [1610, 20, 730, 400],
+      "bounding": [1610, 20, 730, 420],
       "color": "#8c4a2f",
       "font_size": 14
     }
