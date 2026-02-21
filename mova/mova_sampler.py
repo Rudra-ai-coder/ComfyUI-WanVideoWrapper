@@ -345,7 +345,18 @@ def mova_inference_single_step(
     # 9. Unproject / unpatchify
     # ------------------------------------------------------------------ #
     visual_output = visual_dit.head(visual_x, visual_t)
-    visual_output = visual_dit.unpatchify(visual_output, grid_sizes[0])
+    # Support both unpatchify APIs:
+    # - WanVideoWrapper WanModel: unpatchify(x, grid_sizes[B,3]) -> List[Tensor[C,T,H,W]]
+    # - MOVA WanModel        : unpatchify(x, grid_size[3])  -> Tensor[B,C,T,H,W]
+    try:
+        visual_unpatched = visual_dit.unpatchify(visual_output, grid_sizes)
+    except Exception:
+        visual_unpatched = visual_dit.unpatchify(visual_output, grid_sizes[0])
+
+    if isinstance(visual_unpatched, list):
+        visual_output = torch.stack(visual_unpatched, dim=0)
+    else:
+        visual_output = visual_unpatched
     # visual_output: [B, C, T, H*patch, W*patch] — shaped as original latent
 
     audio_output = audio_dit.head(audio_x, audio_t)
