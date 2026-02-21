@@ -30,6 +30,7 @@ Workflow pattern:
 import gc
 import json
 import os
+from contextlib import nullcontext
 from copy import deepcopy
 from typing import Optional
 
@@ -698,6 +699,9 @@ class MOVASampler:
         cur_visual_dit = transformer
         switched = False
 
+        s1_quantization = model_obj.pipeline.get("quantization", "disabled")
+        autocast_enabled = "fp8" in s1_quantization and not getattr(transformer, "patched_linear", False)
+
         progress_bar = ProgressBar(len(timesteps))
 
         total_steps = len(timesteps)
@@ -725,34 +729,14 @@ class MOVASampler:
             audio_timestep_in = audio_t.unsqueeze(0).to(dtype=torch.float32, device=device)
 
             # ---- Positive pass ----
-            noise_pred_pos_vid, noise_pred_pos_aud = mova_inference_single_step(
-                visual_dit=cur_visual_dit,
-                audio_dit=audio_dit_model,
-                bridge=bridge_model,
-                visual_latents=latent_model_input,
-                audio_latents=aud_latents,
-                context=positive_context.to(device, dtype=dtype),
-                timestep=timestep_in,
-                audio_timestep=audio_timestep_in,
-                video_fps=video_fps,
-                clip_fea=clip_fea.to(device, dtype=dtype) if clip_fea is not None else None,
-                transformer_options=transformer_options,
-                condition_scale=bridge_condition_scale,
-                a2v_condition_scale=a2v_condition_scale,
-                v2a_condition_scale=v2a_condition_scale,
-                current_step=step_idx,
-                last_step=is_last,
-            )
-
-            # ---- Negative pass for CFG ----
-            if cfg != 1.0 and negative_context is not None:
-                noise_pred_neg_vid, noise_pred_neg_aud = mova_inference_single_step(
+            with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype) if autocast_enabled else nullcontext():
+                noise_pred_pos_vid, noise_pred_pos_aud = mova_inference_single_step(
                     visual_dit=cur_visual_dit,
                     audio_dit=audio_dit_model,
                     bridge=bridge_model,
                     visual_latents=latent_model_input,
                     audio_latents=aud_latents,
-                    context=negative_context.to(device, dtype=dtype),
+                    context=positive_context.to(device, dtype=dtype),
                     timestep=timestep_in,
                     audio_timestep=audio_timestep_in,
                     video_fps=video_fps,
@@ -764,6 +748,28 @@ class MOVASampler:
                     current_step=step_idx,
                     last_step=is_last,
                 )
+
+            # ---- Negative pass for CFG ----
+            if cfg != 1.0 and negative_context is not None:
+                with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype) if autocast_enabled else nullcontext():
+                    noise_pred_neg_vid, noise_pred_neg_aud = mova_inference_single_step(
+                        visual_dit=cur_visual_dit,
+                        audio_dit=audio_dit_model,
+                        bridge=bridge_model,
+                        visual_latents=latent_model_input,
+                        audio_latents=aud_latents,
+                        context=negative_context.to(device, dtype=dtype),
+                        timestep=timestep_in,
+                        audio_timestep=audio_timestep_in,
+                        video_fps=video_fps,
+                        clip_fea=clip_fea.to(device, dtype=dtype) if clip_fea is not None else None,
+                        transformer_options=transformer_options,
+                        condition_scale=bridge_condition_scale,
+                        a2v_condition_scale=a2v_condition_scale,
+                        v2a_condition_scale=v2a_condition_scale,
+                        current_step=step_idx,
+                        last_step=is_last,
+                    )
                 # CFG for video
                 noise_pred_vid = noise_pred_neg_vid.float() + cfg * (
                     noise_pred_pos_vid.float() - noise_pred_neg_vid.float()
