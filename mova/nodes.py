@@ -450,6 +450,8 @@ class MOVASampler:
                                            "tooltip": "Audio CFG scale. Lower than video CFG often reduces audio artifacts."}),
                 "audio_scheduler": (scheduler_list, {"default": "unipc",
                                                        "tooltip": "Scheduler used for audio latent updates."}),
+                "strict_av_sync": ("BOOLEAN", {"default": True,
+                                                  "tooltip": "When enabled, audio uses the exact same timestep each iteration as video for tighter sync."}),
                 "video_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.1,
                                         "tooltip": "Frames per second — used for cross-modal RoPE alignment."}),
                 "audio_latent_channels": ("INT", {"default": 128, "min": 1, "max": 512,
@@ -496,6 +498,7 @@ class MOVASampler:
         audio_steps: int,
         audio_cfg: float,
         audio_scheduler: str,
+        strict_av_sync: bool,
         video_fps: float,
         audio_latent_channels: int,
         audio_hop_length: int,
@@ -597,14 +600,14 @@ class MOVASampler:
         audio_latent_t = (audio_num_samples - 1) // audio_hop_length + 1
 
         if audio_latents is not None:
-            init_audio_latents = audio_latents.to(device, dtype=dtype)
+            init_audio_latents = audio_latents.to(device=device, dtype=torch.float32)
         else:
             init_audio_latents = torch.randn(
                 init_video_latents.shape[0],
                 audio_latent_channels,
                 audio_latent_t,
                 device=device,
-                dtype=dtype,
+                dtype=torch.float32,
                 generator=torch.Generator(device=device).manual_seed(seed + 1),
             )
 
@@ -740,7 +743,9 @@ class MOVASampler:
 
                 t = timesteps[step_idx]
                 is_last = step_idx == total_steps - 1
-                if len(audio_timesteps) <= 1 or total_steps <= 1:
+                if strict_av_sync:
+                    audio_t = t
+                elif len(audio_timesteps) <= 1 or total_steps <= 1:
                     audio_t = audio_timesteps[0]
                 else:
                     a_idx = int(round(step_idx * (len(audio_timesteps) - 1) / (total_steps - 1)))
@@ -822,7 +827,7 @@ class MOVASampler:
                 )[0].to(dtype)
                 aud_latents = audio_sched.step(
                     noise_pred_aud, audio_t, aud_latents.float(), return_dict=False
-                )[0].to(dtype)
+                )[0]
 
                 progress_bar.update(1)
                 cli_pbar.update(1)
