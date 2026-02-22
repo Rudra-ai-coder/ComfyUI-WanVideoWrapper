@@ -625,18 +625,24 @@ class MOVASampler:
             sigmas=sigmas,
         )
 
-        # Independent audio scheduler/timesteps (mapped onto the video loop below).
-        audio_sched, audio_timesteps, _, _ = get_scheduler(
-            audio_scheduler,
-            audio_steps,
-            0,
-            -1,
-            shift,
-            device,
-            transformer.dim if hasattr(transformer, 'dim') else 5120,
-            denoise_strength,
-            sigmas=None,
-        )
+        # Audio scheduler/timesteps:
+        # - strict_av_sync=True  -> use exact same scheduler/timesteps as video
+        # - strict_av_sync=False -> independent audio schedule mapped across the video loop
+        if strict_av_sync:
+            audio_sched = deepcopy(sample_scheduler)
+            audio_timesteps = timesteps
+        else:
+            audio_sched, audio_timesteps, _, _ = get_scheduler(
+                audio_scheduler,
+                audio_steps,
+                0,
+                -1,
+                shift,
+                device,
+                transformer.dim if hasattr(transformer, 'dim') else 5120,
+                denoise_strength,
+                sigmas=None,
+            )
         # Number of train timesteps (for boundary_timestep computation); default 1000
         num_train_timesteps = 1000
 
