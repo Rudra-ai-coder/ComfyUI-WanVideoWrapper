@@ -724,64 +724,53 @@ class MOVASampler:
         progress_bar = ProgressBar(len(timesteps))
 
         total_steps = len(timesteps)
-        for step_idx in range(total_steps):
-            mm.throw_exception_if_processing_interrupted()
+        cli_progress_env = os.environ.get("MOVA_CLI_PROGRESS", "1").strip().lower()
+        cli_progress_enabled = cli_progress_env not in ("0", "false", "no", "off")
+        cli_pbar = tqdm(
+            total=total_steps,
+            desc="[MOVA] Sampling",
+            dynamic_ncols=True,
+            leave=False,
+            disable=not cli_progress_enabled,
+        )
 
-            t = timesteps[step_idx]
-            is_last = step_idx == total_steps - 1
-            if len(audio_timesteps) <= 1 or total_steps <= 1:
-                audio_t = audio_timesteps[0]
-            else:
-                a_idx = int(round(step_idx * (len(audio_timesteps) - 1) / (total_steps - 1)))
-                audio_t = audio_timesteps[a_idx]
+        try:
+            for step_idx in range(total_steps):
+                mm.throw_exception_if_processing_interrupted()
 
-            # Stage switching: switch to stage-2 video DiT when timestep drops below boundary
-            if not switched and video_dit_2_transformer is not None and t.item() < boundary_timestep:
-                cur_visual_dit = video_dit_2_transformer
-                switched = True
+                t = timesteps[step_idx]
+                is_last = step_idx == total_steps - 1
+                if len(audio_timesteps) <= 1 or total_steps <= 1:
+                    audio_t = audio_timesteps[0]
+                else:
+                    a_idx = int(round(step_idx * (len(audio_timesteps) - 1) / (total_steps - 1)))
+                    audio_t = audio_timesteps[a_idx]
 
-            # Build model input: [B, noise_C + cond_C, T, H, W]
-            # Concatenate noisy video latents with the combined condition tensor
-            # along the channel dimension — matching the WanVideoWrapper I2V convention.
-            if latent_condition is not None:
-                latent_model_input = torch.cat([video_latents, latent_condition], dim=1)
-            else:
-                latent_model_input = video_latents
+                # Stage switching: switch to stage-2 video DiT when timestep drops below boundary
+                if not switched and video_dit_2_transformer is not None and t.item() < boundary_timestep:
+                    cur_visual_dit = video_dit_2_transformer
+                    switched = True
 
-            timestep_in = t.unsqueeze(0).to(dtype=torch.float32, device=device)
-            audio_timestep_in = audio_t.unsqueeze(0).to(dtype=torch.float32, device=device)
+                # Build model input: [B, noise_C + cond_C, T, H, W]
+                # Concatenate noisy video latents with the combined condition tensor
+                # along the channel dimension — matching the WanVideoWrapper I2V convention.
+                if latent_condition is not None:
+                    latent_model_input = torch.cat([video_latents, latent_condition], dim=1)
+                else:
+                    latent_model_input = video_latents
 
-            # ---- Positive pass ----
-            with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype) if autocast_enabled else nullcontext():
-                noise_pred_pos_vid, noise_pred_pos_aud = mova_inference_single_step(
-                    visual_dit=cur_visual_dit,
-                    audio_dit=audio_dit_model,
-                    bridge=bridge_model,
-                    visual_latents=latent_model_input,
-                    audio_latents=aud_latents,
-                    context=positive_context.to(device, dtype=dtype),
-                    timestep=timestep_in,
-                    audio_timestep=audio_timestep_in,
-                    video_fps=video_fps,
-                    clip_fea=clip_fea.to(device, dtype=dtype) if clip_fea is not None else None,
-                    transformer_options=transformer_options,
-                    condition_scale=bridge_condition_scale,
-                    a2v_condition_scale=a2v_condition_scale,
-                    v2a_condition_scale=v2a_condition_scale,
-                    current_step=step_idx,
-                    last_step=is_last,
-                )
+                timestep_in = t.unsqueeze(0).to(dtype=torch.float32, device=device)
+                audio_timestep_in = audio_t.unsqueeze(0).to(dtype=torch.float32, device=device)
 
-            # ---- Negative pass for CFG ----
-            if cfg != 1.0 and negative_context is not None:
+                # ---- Positive pass ----
                 with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype) if autocast_enabled else nullcontext():
-                    noise_pred_neg_vid, noise_pred_neg_aud = mova_inference_single_step(
+                    noise_pred_pos_vid, noise_pred_pos_aud = mova_inference_single_step(
                         visual_dit=cur_visual_dit,
                         audio_dit=audio_dit_model,
                         bridge=bridge_model,
                         visual_latents=latent_model_input,
                         audio_latents=aud_latents,
-                        context=negative_context.to(device, dtype=dtype),
+                        context=positive_context.to(device, dtype=dtype),
                         timestep=timestep_in,
                         audio_timestep=audio_timestep_in,
                         video_fps=video_fps,
@@ -793,27 +782,58 @@ class MOVASampler:
                         current_step=step_idx,
                         last_step=is_last,
                     )
-                # CFG for video
-                noise_pred_vid = noise_pred_neg_vid.float() + cfg * (
-                    noise_pred_pos_vid.float() - noise_pred_neg_vid.float()
-                )
-                # CFG for audio
-                noise_pred_aud = noise_pred_neg_aud.float() + audio_cfg * (
-                    noise_pred_pos_aud.float() - noise_pred_neg_aud.float()
-                )
-            else:
-                noise_pred_vid = noise_pred_pos_vid.float()
-                noise_pred_aud = noise_pred_pos_aud.float()
 
-            # ---- Scheduler step ----
-            video_latents = sample_scheduler.step(
-                noise_pred_vid, t, video_latents.float(), return_dict=False
-            )[0].to(dtype)
-            aud_latents = audio_sched.step(
-                noise_pred_aud, audio_t, aud_latents.float(), return_dict=False
-            )[0].to(dtype)
+                # ---- Negative pass for CFG ----
+                if cfg != 1.0 and negative_context is not None:
+                    with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype) if autocast_enabled else nullcontext():
+                        noise_pred_neg_vid, noise_pred_neg_aud = mova_inference_single_step(
+                            visual_dit=cur_visual_dit,
+                            audio_dit=audio_dit_model,
+                            bridge=bridge_model,
+                            visual_latents=latent_model_input,
+                            audio_latents=aud_latents,
+                            context=negative_context.to(device, dtype=dtype),
+                            timestep=timestep_in,
+                            audio_timestep=audio_timestep_in,
+                            video_fps=video_fps,
+                            clip_fea=clip_fea.to(device, dtype=dtype) if clip_fea is not None else None,
+                            transformer_options=transformer_options,
+                            condition_scale=bridge_condition_scale,
+                            a2v_condition_scale=a2v_condition_scale,
+                            v2a_condition_scale=v2a_condition_scale,
+                            current_step=step_idx,
+                            last_step=is_last,
+                        )
+                    # CFG for video
+                    noise_pred_vid = noise_pred_neg_vid.float() + cfg * (
+                        noise_pred_pos_vid.float() - noise_pred_neg_vid.float()
+                    )
+                    # CFG for audio
+                    noise_pred_aud = noise_pred_neg_aud.float() + audio_cfg * (
+                        noise_pred_pos_aud.float() - noise_pred_neg_aud.float()
+                    )
+                else:
+                    noise_pred_vid = noise_pred_pos_vid.float()
+                    noise_pred_aud = noise_pred_pos_aud.float()
 
-            progress_bar.update(1)
+                # ---- Scheduler step ----
+                video_latents = sample_scheduler.step(
+                    noise_pred_vid, t, video_latents.float(), return_dict=False
+                )[0].to(dtype)
+                aud_latents = audio_sched.step(
+                    noise_pred_aud, audio_t, aud_latents.float(), return_dict=False
+                )[0].to(dtype)
+
+                progress_bar.update(1)
+                cli_pbar.update(1)
+                if cli_progress_enabled:
+                    cli_pbar.set_postfix({
+                        "stage": 2 if switched else 1,
+                        "video_t": f"{t.item():.1f}",
+                        "audio_t": f"{audio_t.item():.1f}",
+                    }, refresh=False)
+        finally:
+            cli_pbar.close()
 
         # ---- Clean up MOVA models if force_offload ----
         if force_offload:
