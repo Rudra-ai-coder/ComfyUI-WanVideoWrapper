@@ -444,6 +444,12 @@ class MOVASampler:
                 "shift": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "scheduler": (scheduler_list, {"default": "unipc"}),
+                "audio_steps": ("INT", {"default": 40, "min": 1, "max": 1000,
+                                            "tooltip": "Audio diffusion steps. Can differ from video steps."}),
+                "audio_cfg": ("FLOAT", {"default": 4.5, "min": 0.0, "max": 30.0, "step": 0.01,
+                                           "tooltip": "Audio CFG scale. Lower than video CFG often reduces audio artifacts."}),
+                "audio_scheduler": (scheduler_list, {"default": "unipc",
+                                                       "tooltip": "Scheduler used for audio latent updates."}),
                 "video_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.1,
                                         "tooltip": "Frames per second — used for cross-modal RoPE alignment."}),
                 "audio_latent_channels": ("INT", {"default": 128, "min": 1, "max": 512,
@@ -487,6 +493,9 @@ class MOVASampler:
         shift: float,
         seed: int,
         scheduler: str,
+        audio_steps: int,
+        audio_cfg: float,
+        audio_scheduler: str,
         video_fps: float,
         audio_latent_channels: int,
         audio_hop_length: int,
@@ -613,8 +622,18 @@ class MOVASampler:
             sigmas=sigmas,
         )
 
-        # Noise schedule for audio — mirror the video scheduler
-        audio_sched = deepcopy(sample_scheduler)
+        # Independent audio scheduler/timesteps (mapped onto the video loop below).
+        audio_sched, audio_timesteps, _, _ = get_scheduler(
+            audio_scheduler,
+            audio_steps,
+            0,
+            -1,
+            shift,
+            device,
+            transformer.dim if hasattr(transformer, 'dim') else 5120,
+            denoise_strength,
+            sigmas=None,
+        )
         # Number of train timesteps (for boundary_timestep computation); default 1000
         num_train_timesteps = 1000
 
@@ -710,7 +729,11 @@ class MOVASampler:
 
             t = timesteps[step_idx]
             is_last = step_idx == total_steps - 1
-            audio_t = t  # same timestep schedule for audio
+            if len(audio_timesteps) <= 1 or total_steps <= 1:
+                audio_t = audio_timesteps[0]
+            else:
+                a_idx = int(round(step_idx * (len(audio_timesteps) - 1) / (total_steps - 1)))
+                audio_t = audio_timesteps[a_idx]
 
             # Stage switching: switch to stage-2 video DiT when timestep drops below boundary
             if not switched and video_dit_2_transformer is not None and t.item() < boundary_timestep:
@@ -775,7 +798,7 @@ class MOVASampler:
                     noise_pred_pos_vid.float() - noise_pred_neg_vid.float()
                 )
                 # CFG for audio
-                noise_pred_aud = noise_pred_neg_aud.float() + cfg * (
+                noise_pred_aud = noise_pred_neg_aud.float() + audio_cfg * (
                     noise_pred_pos_aud.float() - noise_pred_neg_aud.float()
                 )
             else:
@@ -819,6 +842,10 @@ class MOVADecodeAudio:
             "required": {
                 "audio_vae": ("MOVA_AUDIO_VAE", {}),
                 "audio_latents": ("MOVA_AUDIO_LATENTS", {}),
+                "limit_peak": ("BOOLEAN", {"default": True,
+                                              "tooltip": "If waveform peak exceeds 1.0, attenuate to avoid clipping artifacts."}),
+                "peak_target": ("FLOAT", {"default": 0.98, "min": 0.5, "max": 1.0, "step": 0.01,
+                                             "tooltip": "Target absolute peak when limit_peak is enabled."}),
             },
         }
 
@@ -828,7 +855,7 @@ class MOVADecodeAudio:
     CATEGORY = "WanVideoWrapper/MOVA"
 
     @torch.no_grad()
-    def decode(self, audio_vae, audio_latents: torch.Tensor):
+    def decode(self, audio_vae, audio_latents: torch.Tensor, limit_peak: bool = True, peak_target: float = 0.98):
         vae_model = audio_vae["model"]
         sample_rate = audio_vae["sample_rate"]
         dtype = audio_vae["dtype"]
@@ -850,6 +877,12 @@ class MOVADecodeAudio:
             waveform = vae_model.decode(latents)  # [B, 1, audio_T]
 
         waveform = waveform.float().cpu()
+
+        # Prevent hard clipping distortion from occasional decode overshoot.
+        if limit_peak:
+            peak = waveform.abs().amax()
+            if torch.isfinite(peak) and peak > 1.0:
+                waveform = waveform * (peak_target / peak)
 
         vae_model.to(offload_device)
         mm.soft_empty_cache()

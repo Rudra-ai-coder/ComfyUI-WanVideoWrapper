@@ -226,7 +226,7 @@
         {"name": "audio_latents", "type": "MOVA_AUDIO_LATENTS", "links": [13], "slot_index": 1}
       ],
       "properties": {"Node name for S&R": "MOVASampler"},
-      "widgets_values": [30, 6.0, 5.0, 42, "unipc", 24.0, 128, 2048, 44100, 0.9, true]
+      "widgets_values": [30, 6.0, 5.0, 42, "unipc", 40, 4.5, "unipc", 24.0, 128, 2048, 44100, 0.9, true]
     },
     {
       "id": 11,
@@ -262,7 +262,7 @@
         {"name": "audio", "type": "AUDIO", "links": [15], "slot_index": 0}
       ],
       "properties": {"Node name for S&R": "MOVADecodeAudio"},
-      "widgets_values": []
+      "widgets_values": [true, 0.98]
     },
     {
       "id": 13,
